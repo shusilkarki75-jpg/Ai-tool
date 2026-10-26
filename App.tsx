@@ -3,12 +3,15 @@ import {
     Play, Pause, Music, Mic2, Download, Heart, Share2, Disc, Wand2, Volume2,
     SkipBack, SkipForward, Radio, Sparkles, X, BookOpen, Save, RefreshCw, Layers,
     Menu, Info, ChevronLeft, Image as ImageIcon, Link, Check, Copy, FileText, MessageSquare, Book, PenTool, Eraser,
-    Settings, Moon, Sun, Globe, Type as TypeIcon, HelpCircle, ChevronDown, ChevronUp, Edit3, Loader2, Square, Maximize2, Minimize2, ZoomIn, ZoomOut, List
+    Settings, Moon, Sun, Globe, Type as TypeIcon, HelpCircle, ChevronDown, ChevronUp, Edit3, Loader2, Square, Maximize2, Minimize2, ZoomIn, ZoomOut, List,
+    ExternalLink
 } from 'lucide-react';
 
 import { contentTypesData } from './constants';
 import { ContentTypeKey, Song, Note, DictionaryResult, ImagePrompt, ViewState } from './types';
 import * as Gemini from './services/geminiService';
+import { audioSynth } from './services/audioSynth';
+import { speechService } from './services/speechService';
 import { Type } from '@google/genai';
 
 // --- Localization & Constants ---
@@ -92,6 +95,8 @@ export default function App() {
     const [expandedFaqIndex, setExpandedFaqIndex] = useState<number | null>(null);
     const [imageFitMode, setImageFitMode] = useState<'contain' | 'cover'>('contain');
     const [isMobileSceneListOpen, setIsMobileSceneListOpen] = useState(false);
+    const [sunoCopied, setSunoCopied] = useState(false);
+    const [spokenWord, setSpokenWord] = useState("");
 
     // --- Refs ---
     const stopGenerationRef = useRef(false);
@@ -133,20 +138,11 @@ export default function App() {
     }, [contentType]);
 
     useEffect(() => {
-        let interval: NodeJS.Timeout;
-        if (isPlaying && currentSong) {
-            interval = setInterval(() => {
-                setCurrentTime(prev => {
-                    if (prev >= duration) {
-                        setIsPlaying(false);
-                        return 0;
-                    }
-                    return prev + 1;
-                });
-            }, 1000);
-        }
-        return () => clearInterval(interval);
-    }, [isPlaying, currentSong, duration]);
+        return () => {
+            audioSynth.stopPlayback();
+            speechService.stop();
+        };
+    }, []);
 
     // --- Handlers ---
     
@@ -208,67 +204,111 @@ export default function App() {
     const handleAiContentGeneration = async () => {
         if (!aiPrompt.trim()) return;
         setIsAiLoading(true);
-        const finalStyle = styleSelection === "Other..." ? customStyle : styleSelection;
-        const prompt = `Write high-quality ${currentContentTypeData.label} about: "${aiPrompt}". Style: ${finalStyle}, ${styleDetails}. Language: ${appLanguage === 'Nepali' ? 'Nepali' : appLanguage === 'Hindi' ? 'Hindi' : 'English/Nepali Mix'}. Output ONLY the generated content text.`;
-        const text = await Gemini.generateText(prompt, `You are a professional content creator for ${currentContentTypeData.label}.`);
-        if (text) setContent(text);
-        setIsAiLoading(false);
-        if (maximizedSection === 'DRAFTER') setMaximizedSection(null);
+        setErrorMsg("");
+        try {
+            const finalStyle = styleSelection === "Other..." ? customStyle : styleSelection;
+            const prompt = `Write high-quality ${currentContentTypeData.label} about: "${aiPrompt}". Style: ${finalStyle}, ${styleDetails}. Language: ${appLanguage === 'Nepali' ? 'Nepali' : appLanguage === 'Hindi' ? 'Hindi' : 'English/Nepali Mix'}. Output ONLY the generated content text.`;
+            const text = await Gemini.generateText(prompt, `You are a professional content creator for ${currentContentTypeData.label}.`);
+            if (text) {
+                setContent(text);
+            } else {
+                setErrorMsg("Content generation failed. Please try again.");
+                setTimeout(() => setErrorMsg(""), 4000);
+            }
+        } catch (e: any) {
+            console.error("Content generation error:", e);
+            setErrorMsg("Generation error: " + (e?.message || "Unknown error"));
+            setTimeout(() => setErrorMsg(""), 4000);
+        } finally {
+            setIsAiLoading(false);
+            if (maximizedSection === 'DRAFTER') setMaximizedSection(null);
+        }
     };
 
     const handleRefinePrompt = async () => {
         if (!aiPrompt.trim()) return;
         setIsAiLoading(true);
-        const prompt = `Refine this prompt to be more descriptive, creative, and specific for an AI content generator. Keep the language consistent. Prompt: "${aiPrompt}"`;
-        const text = await Gemini.generateText(prompt, "You are an expert prompt engineer. Output only the refined prompt.");
-        if (text) setAiPrompt(text);
-        setIsAiLoading(false);
+        try {
+            const prompt = `Refine this prompt to be more descriptive, creative, and specific for an AI content generator. Keep the language consistent. Prompt: "${aiPrompt}"`;
+            const text = await Gemini.generateText(prompt, "You are an expert prompt engineer. Output only the refined prompt.");
+            if (text) {
+                setAiPrompt(text);
+            } else {
+                setErrorMsg("Failed to refine prompt.");
+                setTimeout(() => setErrorMsg(""), 3000);
+            }
+        } catch (e) {
+            console.error("Refine prompt error:", e);
+        } finally {
+            setIsAiLoading(false);
+        }
     };
 
     const handleDictionarySearch = async () => {
         if (!dictionaryQuery.trim()) return;
         setDictionaryResults([]);
         setIsAiLoading(true);
-        const prompt = `Find 5 words that rhyme with '${dictionaryQuery}' in Nepali, Hindi, or Sanskrit.`;
-        const schema = {
-            type: Type.ARRAY,
-            items: {
-                type: Type.OBJECT,
-                properties: { word: { type: Type.STRING }, language: { type: Type.STRING }, meaning: { type: Type.STRING } },
-                required: ["word", "language", "meaning"]
+        try {
+            const prompt = `Find 5 words that rhyme with '${dictionaryQuery}' in Nepali, Hindi, or Sanskrit.`;
+            const schema = {
+                type: Type.ARRAY,
+                items: {
+                    type: Type.OBJECT,
+                    properties: { word: { type: Type.STRING }, language: { type: Type.STRING }, meaning: { type: Type.STRING } },
+                    required: ["word", "language", "meaning"]
+                }
+            };
+            const data = await Gemini.generateStructuredData(prompt, "You are a rhyme dictionary.", schema);
+            if (data && Array.isArray(data)) {
+                setDictionaryResults(data);
+            } else {
+                setErrorMsg("Failed to fetch rhymes.");
+                setTimeout(() => setErrorMsg(""), 3000);
             }
-        };
-        const data = await Gemini.generateStructuredData(prompt, "You are a rhyme dictionary.", schema);
-        if (data) setDictionaryResults(data);
-        else setErrorMsg("Failed to fetch rhymes.");
-        setIsAiLoading(false);
+        } catch (e) {
+            console.error("Dictionary search error:", e);
+            setErrorMsg("Failed to search dictionary.");
+            setTimeout(() => setErrorMsg(""), 3000);
+        } finally {
+            setIsAiLoading(false);
+        }
     };
 
     const handleBreakdownContent = async () => {
         if (!content.trim()) { setErrorMsg("Please enter content first."); return; }
         setIsImagePrompting(true);
-        const count = Math.max(1, Math.min(10, promptCount));
-        const prompt = `Break down this ${currentContentTypeData.label} into ${count} cinematic image prompts.`;
-        const schema = {
-            type: Type.ARRAY,
-            items: {
-                type: Type.OBJECT,
-                properties: { id: { type: Type.INTEGER }, prompt_en: { type: Type.STRING }, prompt_ne: { type: Type.STRING } },
-                required: ["id", "prompt_en", "prompt_ne"]
+        try {
+            const count = Math.max(1, Math.min(10, promptCount));
+            const prompt = `Break down this ${currentContentTypeData.label} into ${count} cinematic image prompts.`;
+            const schema = {
+                type: Type.ARRAY,
+                items: {
+                    type: Type.OBJECT,
+                    properties: { id: { type: Type.INTEGER }, prompt_en: { type: Type.STRING }, prompt_ne: { type: Type.STRING } },
+                    required: ["id", "prompt_en", "prompt_ne"]
+                }
+            };
+            const data = await Gemini.generateStructuredData(prompt + `\n\nContent: ${content}`, "You are a visual director.", schema);
+            if (data && Array.isArray(data)) {
+                const formatted = data.map((p: any) => ({ 
+                    id: p.id, 
+                    prompt: p.prompt_en, 
+                    summary_ne: p.prompt_ne, 
+                    status: 'pending' 
+                }));
+                setImagePrompts(formatted);
+                setSelectedImagePromptIndex(0);
+            } else {
+                setErrorMsg("Failed to generate storyboard scenes.");
+                setTimeout(() => setErrorMsg(""), 3000);
             }
-        };
-        const data = await Gemini.generateStructuredData(prompt + `\n\nContent: ${content}`, "You are a visual director.", schema);
-        if (data) {
-            const formatted = data.map((p: any) => ({ 
-                id: p.id, 
-                prompt: p.prompt_en, 
-                summary_ne: p.prompt_ne, 
-                status: 'pending' 
-            }));
-            setImagePrompts(formatted);
-            setSelectedImagePromptIndex(0);
+        } catch (e) {
+            console.error("Breakdown content error:", e);
+            setErrorMsg("Failed to generate scenes.");
+            setTimeout(() => setErrorMsg(""), 3000);
+        } finally {
+            setIsImagePrompting(false);
         }
-        setIsImagePrompting(false);
     };
 
     const generateSingleImage = async (index: number) => {
@@ -281,7 +321,7 @@ export default function App() {
         setImagePrompts(updatedPrompts);
         
         const enhancedPrompt = `${currentP.prompt}, cinematic, 8k, highly detailed, atmospheric lighting`;
-        const b64 = await Gemini.generateImageContent(enhancedPrompt);
+        const b64 = await Gemini.generateImageContent(enhancedPrompt, currentP.id);
         
         // Because checking strict equality of array ref in React state, use functional update to ensure latest state if called in loop
         setImagePrompts(prev => {
@@ -307,7 +347,6 @@ export default function App() {
         // Sequential generation to avoid potential rate limits or browser lag with multiple canvas ops
         for (let i = 0; i < imagePrompts.length; i++) {
              if (stopGenerationRef.current) break;
-             // Only generate if not already generated to save credits/time, 
              if (imagePrompts[i].status !== 'generated') {
                 await generateSingleImage(i);
              }
@@ -336,34 +375,150 @@ export default function App() {
     };
 
     const handleSimulateMusic = () => {
+        speechService.stop();
         const colors = ['bg-rose-500', 'bg-indigo-500', 'bg-emerald-500', 'bg-purple-500', 'bg-sky-500'];
+        const trackDuration = 180 + Math.floor(Math.random() * 60);
         const newSong: Song = {
             id: Date.now(),
             title: title || "Untitled Track",
             style: styleSelection,
             date: new Date().toLocaleDateString(),
-            duration: 180 + Math.floor(Math.random() * 60),
+            duration: trackDuration,
             coverColor: colors[Math.floor(Math.random() * colors.length)],
             lyrics: content
         };
         setGeneratedSongs([newSong, ...generatedSongs]);
         setCurrentSong(newSong);
-        setDuration(newSong.duration);
+        setDuration(trackDuration);
+        setCurrentTime(0);
+        setIsPlaying(true);
+        audioSynth.startPlayback(
+            trackDuration, 
+            (sec) => setCurrentTime(sec), 
+            () => setIsPlaying(false)
+        );
+        setShowMusicOptions(false);
+        setErrorMsg("🎵 नेपाली बाँसुरी/लोक धुन सिमुलेट भयो! (100% नि:शुल्क)");
+        setTimeout(() => setErrorMsg(""), 3500);
+    };
+
+    const handleReciteLyrics = (withMelody: boolean = false) => {
+        if (!content.trim()) {
+            setErrorMsg("पहिले गीत वा कथा लेख्नुहोस्।");
+            setTimeout(() => setErrorMsg(""), 3000);
+            return;
+        }
+
+        // Estimate duration based on word count (approx 2 words per second)
+        const wordCount = content.trim().split(/\s+/).length;
+        const estDuration = Math.max(30, Math.ceil(wordCount / 1.8));
+
+        const colors = ['bg-purple-600', 'bg-indigo-600', 'bg-teal-600', 'bg-pink-600'];
+        const newSong: Song = {
+            id: Date.now(),
+            title: title || "काव्य वाचन",
+            style: withMelody ? "वाचन + बाँसुरी धुन (Voice + Flute)" : "शुद्ध स्वर वाचन (Voice Only)",
+            date: new Date().toLocaleDateString(),
+            duration: estDuration,
+            coverColor: colors[Math.floor(Math.random() * colors.length)],
+            lyrics: content
+        };
+
+        setGeneratedSongs([newSong, ...generatedSongs]);
+        setCurrentSong(newSong);
+        setDuration(estDuration);
         setCurrentTime(0);
         setIsPlaying(true);
         setShowMusicOptions(false);
-        setErrorMsg("Simulated music generated!");
-        setTimeout(() => setErrorMsg(""), 3000);
+
+        // Stop any current audio
+        audioSynth.stopPlayback();
+        speechService.stop();
+
+        // Start Speech Recitation
+        speechService.speak(content, {
+            lang: appLanguage === 'Nepali' ? 'ne-NP' : appLanguage === 'Hindi' ? 'hi-IN' : 'ne-NP',
+            rate: 0.95,
+            onProgress: (charIndex, word) => {
+                setSpokenWord(word);
+            },
+            onEnd: () => {
+                setIsPlaying(false);
+                setSpokenWord("");
+                if (withMelody) audioSynth.stopPlayback();
+            }
+        });
+
+        // If melody requested, start soft flute melody backing
+        if (withMelody) {
+            audioSynth.startPlayback(estDuration, (sec) => setCurrentTime(sec), () => {
+                speechService.stop();
+                setIsPlaying(false);
+            });
+        } else {
+            const interval = window.setInterval(() => {
+                if (!speechService.isActive()) {
+                    clearInterval(interval);
+                    return;
+                }
+                setCurrentTime(prev => {
+                    if (prev >= estDuration) {
+                        clearInterval(interval);
+                        return estDuration;
+                    }
+                    return prev + 1;
+                });
+            }, 1000);
+        }
+
+        setErrorMsg(withMelody ? "🎙️ वाचन तथा बाँसुरी धुन सुरु भयो!" : "🎙️ शब्दहरू पढेर सुनाइँदैछ!");
+        setTimeout(() => setErrorMsg(""), 3500);
+    };
+
+    const handleExportToSuno = () => {
+        if (!content.trim()) {
+            setErrorMsg("कपी गर्न पहिले लिरिक्स वा कथा लेख्नुहोस्।");
+            setTimeout(() => setErrorMsg(""), 3000);
+            return;
+        }
+        navigator.clipboard.writeText(content);
+        setSunoCopied(true);
+        setErrorMsg("✓ शब्दहरू कपी भयो! Suno.com खुल्दैछ...");
+        setTimeout(() => setSunoCopied(false), 5000);
     };
 
     const togglePlay = (song: Song) => {
         if (currentSong?.id === song.id) {
-            setIsPlaying(!isPlaying);
+            if (isPlaying) {
+                audioSynth.stopPlayback();
+                speechService.stop();
+                setIsPlaying(false);
+            } else {
+                if (song.style.includes("वाचन") || song.style.includes("Voice")) {
+                    handleReciteLyrics(song.style.includes("Flute") || song.style.includes("धुन"));
+                } else {
+                    audioSynth.startPlayback(
+                        Math.max(10, duration - currentTime), 
+                        (sec) => setCurrentTime(prev => prev + 1), 
+                        () => setIsPlaying(false)
+                    );
+                    setIsPlaying(true);
+                }
+            }
         } else {
             setCurrentSong(song);
             setDuration(song.duration);
             setCurrentTime(0);
             setIsPlaying(true);
+            if (song.style.includes("वाचन") || song.style.includes("Voice")) {
+                handleReciteLyrics(song.style.includes("Flute") || song.style.includes("धुन"));
+            } else {
+                audioSynth.startPlayback(
+                    song.duration, 
+                    (sec) => setCurrentTime(sec), 
+                    () => setIsPlaying(false)
+                );
+            }
         }
     };
 
@@ -707,6 +862,30 @@ export default function App() {
                                     </div>
                                 </div>
                             </div>
+
+                            {/* 100% Free Plan Confirmation Card */}
+                            <div className={`p-6 rounded-2xl border ${tc.border} bg-gradient-to-r from-emerald-950/40 via-teal-950/20 to-slate-900/40 border-emerald-500/30 space-y-3`}>
+                                <div className="flex items-center gap-3">
+                                    <div className="p-2.5 rounded-xl bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                                        <Sparkles size={22} />
+                                    </div>
+                                    <div>
+                                        <h3 className="font-bold text-base text-emerald-400 flex items-center gap-2">
+                                            100% नि:शुल्क संस्करण (Free of Cost)
+                                        </h3>
+                                        <p className="text-xs text-gray-400">कुनै पनि शुल्क वा Paid API Key आवश्यक पर्दैन</p>
+                                    </div>
+                                </div>
+                                <p className="text-xs text-gray-300 leading-relaxed">
+                                    यस एप्लिकेसनमा सबै फिचरहरू (गीत, कथा, समाचार, भाषण, अनुप्रास शब्दकोश, वेब अडियो संगीत सिन्थेसाइजर र दृश्य स्टोरीबोर्ड) विना कुनै भुक्तानी पूर्ण रूपमा निःशुल्क चल्ने गरी कन्फिगर गरिएको छ।
+                                </p>
+                                <div className="flex flex-wrap gap-2 pt-1 text-[11px] text-emerald-300 font-mono">
+                                    <span className="bg-emerald-950/80 px-2.5 py-1 rounded-md border border-emerald-500/20">✓ Gemini 3.8 Flash Free</span>
+                                    <span className="bg-emerald-950/80 px-2.5 py-1 rounded-md border border-emerald-500/20">✓ Client-Side Web Audio</span>
+                                    <span className="bg-emerald-950/80 px-2.5 py-1 rounded-md border border-emerald-500/20">✓ Free Cinematic Storyboard</span>
+                                    <span className="bg-emerald-950/80 px-2.5 py-1 rounded-md border border-emerald-500/20">✓ Zero Billing / Free Forever</span>
+                                </div>
+                            </div>
                         </div>
                     )}
                     
@@ -764,10 +943,21 @@ export default function App() {
                 {currentSong && (
                     <div className={`h-20 ${tc.bgSidebar} border-t ${tc.border} px-6 flex items-center justify-between z-30`}>
                         <div className="flex items-center gap-4 w-1/3">
-                            <div className={`h-12 w-12 rounded bg-gray-800 ${currentSong.coverColor} flex items-center justify-center`}><Music size={20} className="text-white/80"/></div>
+                            <div className={`h-12 w-12 rounded ${currentSong.coverColor} flex items-center justify-center shadow-lg transition-transform ${isPlaying ? 'scale-105' : ''}`}>
+                                {currentSong.style.includes("वाचन") || currentSong.style.includes("Voice") ? (
+                                    <Mic2 size={20} className={`text-white/90 ${isPlaying ? 'animate-bounce-slow' : ''}`}/>
+                                ) : (
+                                    <Music size={20} className={`text-white/90 ${isPlaying ? 'animate-pulse' : ''}`}/>
+                                )}
+                            </div>
                             <div className="min-w-0">
                                 <div className={`font-bold text-sm truncate ${tc.text}`}>{currentSong.title}</div>
-                                <div className={`text-xs ${tc.textMuted} truncate`}>{currentSong.style}</div>
+                                <div className={`text-xs ${tc.textMuted} truncate flex items-center gap-1`}>
+                                    <span>{currentSong.style}</span>
+                                    {spokenWord && isPlaying && (
+                                        <span className="text-[11px] text-indigo-400 font-mono animate-pulse">• "{spokenWord}"</span>
+                                    )}
+                                </div>
                             </div>
                         </div>
                         <div className="flex flex-col items-center flex-1">
@@ -825,19 +1015,111 @@ export default function App() {
                  </div>
             )}
 
-            {/* Music Options Modal */}
+            {/* Music & Audio Options Modal */}
             {showMusicOptions && (
                 <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
-                    <div className={`${tc.bgCard} border ${tc.border} rounded-2xl p-6 w-full max-w-sm space-y-4 shadow-2xl`}>
-                        <h3 className={`text-xl font-bold flex items-center gap-2 ${tc.text}`}><Disc className="text-rose-500"/> Generate Audio</h3>
-                        <p className={`text-sm ${tc.textMuted}`}>Choose how to realize this composition.</p>
-                        <button onClick={handleSimulateMusic} className="w-full py-3 bg-rose-600 hover:bg-rose-700 text-white rounded-xl font-bold flex items-center justify-center gap-2">
-                            <Music size={18}/> Simulate Generation
+                    <div className={`${tc.bgCard} border ${tc.border} rounded-2xl p-6 w-full max-w-md space-y-4 shadow-2xl animate-in zoom-in-95 duration-150`}>
+                        <div className="flex justify-between items-center pb-2 border-b border-gray-800">
+                            <h3 className={`text-xl font-bold flex items-center gap-2 ${tc.text}`}>
+                                <Disc className="text-rose-500"/> अडियो विकल्पहरू (Audio Options)
+                            </h3>
+                            <button onClick={() => setShowMusicOptions(false)} className={`p-1 text-gray-400 hover:${tc.text}`}>
+                                <X size={20}/>
+                            </button>
+                        </div>
+                        <p className={`text-xs ${tc.textMuted}`}>
+                            तलका कुनै पनि विकल्प प्रयोग गरी अडियो सुन्नुहोस् वा सुनो एआई (Suno AI) मा पठाउनुहोस्:
+                        </p>
+
+                        <div className="space-y-3">
+                            {/* Option 1: Spoken Voice Recitation (TTS) */}
+                            <button 
+                                onClick={() => handleReciteLyrics(false)}
+                                className="w-full p-3.5 bg-gradient-to-r from-indigo-900/60 to-purple-900/50 hover:from-indigo-800 hover:to-purple-800 border border-indigo-500/30 rounded-xl text-left transition-all group flex items-start gap-3"
+                            >
+                                <div className="p-2.5 bg-indigo-500/20 text-indigo-400 rounded-lg group-hover:scale-105 transition-transform mt-0.5">
+                                    <Volume2 size={20}/>
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                    <div className="font-bold text-sm text-white flex items-center gap-2">
+                                        स्वरमा वाचन सुन्नुहोस् (Voice Recitation)
+                                        <span className="text-[10px] bg-indigo-500/20 text-indigo-300 px-1.5 py-0.5 rounded border border-indigo-500/30">नि:शुल्क</span>
+                                    </div>
+                                    <p className="text-xs text-gray-300 mt-0.5">
+                                        लिरिक्स वा कथाका शब्दहरूलाई स्पष्ट आवाजमा पढेर सुनाउँछ।
+                                    </p>
+                                </div>
+                            </button>
+
+                            {/* Option 2: Spoken Voice + Flute Background */}
+                            <button 
+                                onClick={() => handleReciteLyrics(true)}
+                                className="w-full p-3.5 bg-gradient-to-r from-emerald-900/60 to-teal-900/50 hover:from-emerald-800 hover:to-teal-800 border border-emerald-500/30 rounded-xl text-left transition-all group flex items-start gap-3"
+                            >
+                                <div className="p-2.5 bg-emerald-500/20 text-emerald-400 rounded-lg group-hover:scale-105 transition-transform mt-0.5">
+                                    <Mic2 size={20}/>
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                    <div className="font-bold text-sm text-white flex items-center gap-2">
+                                        वाचन + बाँसुरी पृष्ठभूमि धुन (Voice + Flute)
+                                        <span className="text-[10px] bg-emerald-500/20 text-emerald-300 px-1.5 py-0.5 rounded border border-emerald-500/30">लोक धुन</span>
+                                    </div>
+                                    <p className="text-xs text-gray-300 mt-0.5">
+                                        आवाजसँगै मीठो नेपाली बाँसुरी र लोक धुनको साथमा सुन्नुहोस्।
+                                    </p>
+                                </div>
+                            </button>
+
+                            {/* Option 3: Flute / Folk Melody Synthesizer only */}
+                            <button 
+                                onClick={handleSimulateMusic}
+                                className="w-full p-3.5 bg-gradient-to-r from-rose-900/60 to-pink-900/50 hover:from-rose-800 hover:to-pink-800 border border-rose-500/30 rounded-xl text-left transition-all group flex items-start gap-3"
+                            >
+                                <div className="p-2.5 bg-rose-500/20 text-rose-400 rounded-lg group-hover:scale-105 transition-transform mt-0.5">
+                                    <Music size={20}/>
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                    <div className="font-bold text-sm text-white flex items-center gap-2">
+                                        बाँसुरी/लोक धुन मात्र (Melody Synthesizer)
+                                        <span className="text-[10px] bg-rose-500/20 text-rose-300 px-1.5 py-0.5 rounded border border-rose-500/30">नि:शुल्क</span>
+                                    </div>
+                                    <p className="text-xs text-gray-300 mt-0.5">
+                                        नेपाली राग र लोक धुनको शुद्ध इन्स्ट्रुमेन्टल संगीत सुन्नुहोस्।
+                                    </p>
+                                </div>
+                            </button>
+
+                            {/* Option 4: Redirect to Suno AI */}
+                            <div className="pt-2 border-t border-gray-800">
+                                <a 
+                                    href="https://suno.com/create" 
+                                    target="_blank" 
+                                    rel="noopener noreferrer"
+                                    onClick={handleExportToSuno}
+                                    className="w-full p-3.5 bg-gradient-to-r from-amber-600 via-orange-600 to-amber-700 hover:from-amber-500 hover:to-orange-500 text-white rounded-xl font-bold flex items-center justify-between shadow-lg shadow-orange-950/40 transition-all block group"
+                                >
+                                    <div className="flex items-center gap-3">
+                                        <div className="p-2 bg-white/20 rounded-lg group-hover:rotate-6 transition-transform">
+                                            <Radio size={18}/>
+                                        </div>
+                                        <div className="text-left">
+                                            <div className="text-sm font-bold flex items-center gap-1.5">
+                                                Suno AI मा पूरा गीत बनाउनुहोस्
+                                                <ExternalLink size={14}/>
+                                            </div>
+                                            <div className="text-[11px] text-amber-100 font-normal">
+                                                {sunoCopied ? "✓ शब्दहरू क्लिपबोर्डमा कपी भयो!" : "क्लिक गर्दा लिरिक्स कपी हुन्छ र Suno.com खुल्छ"}
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <span className="text-xs bg-black/30 px-2.5 py-1 rounded-md font-mono border border-white/20">suno.com ↗</span>
+                                </a>
+                            </div>
+                        </div>
+
+                        <button onClick={() => setShowMusicOptions(false)} className={`w-full py-2 text-xs ${tc.textMuted} hover:${tc.text}`}>
+                            बन्द गर्नुहोस् (Close)
                         </button>
-                        <button className="w-full py-3 bg-gray-700 rounded-xl text-gray-400 font-bold flex items-center justify-center gap-2 cursor-not-allowed opacity-60">
-                            <Link size={18}/> Export to Suno (Coming Soon)
-                        </button>
-                        <button onClick={() => setShowMusicOptions(false)} className={`w-full py-2 text-sm ${tc.textMuted} hover:${tc.text}`}>Cancel</button>
                     </div>
                 </div>
             )}
