@@ -6,6 +6,7 @@ export default defineConfig(({ mode }) => {
     const env = loadEnv(mode, '.', '');
     const geminiKey = env.GEMINI_API_KEY || process.env.GEMINI_API_KEY || '';
     return {
+        base: 'Ai-tool/',
       server: {
         port: 3000,
         host: '0.0.0.0',
